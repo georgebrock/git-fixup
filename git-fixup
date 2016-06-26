@@ -31,6 +31,13 @@ Limitations:
 * git-fixup will only attempt to patch files that have been modified, but
   haven't been staged yet.
 
+Problems:
+
+* Anything in the index before running git-fixup will be erroniously included
+  in the first commit git-fixup makes.
+
+* git-fixup makes no attempt to work out if the commit it's fixing up is
+  appropriate, e.g. it could be a commit already merged into master.
 """
 
 from __future__ import print_function
