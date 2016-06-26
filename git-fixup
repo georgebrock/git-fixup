@@ -28,13 +28,7 @@ Limitations:
      by a single commit, in which case git-fixup will fixup the whole group
      of changes onto that one commit.
 
-* git-fixup will only attempt to patch files that have been modified, but
-  haven't been staged yet.
-
 Problems:
-
-* Anything in the index before running git-fixup will be erroniously included
-  in the first commit git-fixup makes.
 
 * git-fixup makes no attempt to work out if the commit it's fixing up is
   appropriate, e.g. it could be a commit already merged into master.
@@ -56,12 +50,21 @@ STATUS_PATTERN = re.compile(r"^(?P<status>..)\s+(?P<path>[^ ]+)")
 
 class Status(object):
     MODIFIED_NOT_STAGED = " M"
+    UNTRACKED = "??"
 
     def modified_paths(self):
         return [
             status["path"]
             for status in self.statuses()
             if status["status"] == self.MODIFIED_NOT_STAGED
+        ]
+
+    def indexed_paths(self):
+        return [
+            status["path"]
+            for status in self.statuses()
+            if status["status"] != self.UNTRACKED and
+            status["status"][0] != " "
         ]
 
     def statuses(self):
@@ -239,8 +242,16 @@ class File(object):
 class CLI(object):
     def __init__(self, args):
         self.args = args
+        self.status = Status()
 
     def run(self):
+        if len(self.status.indexed_paths()) > 0:
+            print(
+                "Cannot fixup while there are changes in the index",
+                file=sys.stderr
+            )
+            sys.exit(1)
+
         for path in self.paths():
             f = File(path)
 
@@ -254,7 +265,7 @@ class CLI(object):
 
     def paths(self):
         if len(self.args) == 1:
-            return Status().modified_paths()
+            return self.status.modified_paths()
         elif len(self.args) == 2:
             return [self.args[1]]
 
