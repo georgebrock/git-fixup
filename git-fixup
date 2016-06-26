@@ -17,20 +17,25 @@ Usage:
 
 Limitations:
 
-* git-fixup will only attempt to patch files with the same number of lines
-  before and after the current changes.
+* git-fixup will only attempt to patch files with simple changes. "Simple"
+  means that either:
+
+  1. the number of lines in a changed area has stayed the same, in which case
+     git-fixup will assume that the change to each line can be individually
+     fixedup on the commit that last touched the line, or
+
+  2. that a group of changed lines only affects lines that were last touched
+     by a single commit, in which case git-fixup will fixup the whole group
+     of changes onto that one commit.
 
 * git-fixup will only attempt to patch files that have been modified, but
   haven't been staged yet.
 
-* If the number of lines in a file hasn't changed, but the changes are separate
-  (e.g. a line was removed from the beginning of the file, while another was
-  removed from the end of the file) the commits made by git-fixup will be
-  surprising, and may cause merge conflicts during the rebase.
 """
 
 from __future__ import print_function
 from collections import defaultdict
+from itertools import izip_longest
 import difflib
 import re
 import subprocess
@@ -62,25 +67,30 @@ class Status(object):
 
 class Line(object):
     @classmethod
-    def from_blame(cls, file, working_line, head_line):
-        working = BLAME_PATTERN.match(working_line).groupdict()
-        head = BLAME_PATTERN.match(head_line).groupdict()
+    def from_blame(cls, file, working_line, head_line, commit=None):
+        if working_line is not None:
+            working = BLAME_PATTERN.match(working_line).groupdict()
+        else:
+            working = {}
+
+        if head_line is not None:
+            head = BLAME_PATTERN.match(head_line).groupdict()
+        else:
+            head = {}
 
         return cls(
             file=file,
-            number=head["line_number"],
             changed=(working_line != head_line),
-            old_contents=head["contents"],
-            new_contents=working["contents"],
-            last_commit=head["commit"],
+            old_contents=head.get("contents"),
+            new_contents=working.get("contents"),
+            last_commit=head.get("commit", commit),
         )
 
     def __init__(
-        self, file, number, changed, old_contents, new_contents, last_commit,
+        self, file, changed, old_contents, new_contents, last_commit,
     ):
         self.applied = False
         self.file = file
-        self.number = number
         self.changed = changed
         self.old_contents = old_contents
         self.new_contents = new_contents
@@ -94,7 +104,7 @@ class Line(object):
 
 
 class File(object):
-    class NumberOfLinesChanged(Exception):
+    class AmbiguousSection(Exception):
         pass
 
     def __init__(self, path):
@@ -126,12 +136,15 @@ class File(object):
 
         for line in self.lines():
             if line in changed_lines:
-                before.append(line.old_contents + "\n")
-                after.append(line.new_contents + "\n")
+                before.append(line.old_contents)
+                after.append(line.new_contents)
                 line.applied = True
             else:
-                before.append(line.contents_for_context() + "\n")
-                after.append(line.contents_for_context() + "\n")
+                before.append(line.contents_for_context())
+                after.append(line.contents_for_context())
+
+        before = [line + "\n" for line in before if line is not None]
+        after = [line + "\n" for line in after if line is not None]
 
         patch = difflib.unified_diff(
             before,
@@ -144,16 +157,62 @@ class File(object):
 
     def lines(self):
         if not hasattr(self, "_lines"):
-            if len(self.working_blame()) != len(self.head_blame()):
-                raise self.NumberOfLinesChanged()
+            self._lines = []
+            head = self.head_blame()
+            working = self.working_blame()
+            sm = difflib.SequenceMatcher(a=head, b=working)
 
-            self._lines = [
-                Line.from_blame(self, working, head)
-                for (working, head)
-                in zip(self.working_blame(), self.head_blame())
-            ]
+            head_index = 0
+            working_index = 0
+
+            for block in sm.get_matching_blocks():
+                unmatching_head = head[head_index:block.a]
+                unmatching_working = working[working_index:block.b]
+
+                matching_head = head[block.a:block.a + block.size]
+                matching_working = head[block.b:block.b + block.size]
+
+                if len(unmatching_head) == len(unmatching_working):
+                    self._lines.extend(self._lines_from_pairs(
+                        unmatching_head,
+                        unmatching_working,
+                    ))
+                else:
+                    self._lines.extend(self._lines_from_unmatched_sections(
+                        unmatching_head,
+                        unmatching_working,
+                    ))
+
+                self._lines.extend(self._lines_from_pairs(
+                    matching_head,
+                    matching_working,
+                ))
+
+                head_index = block.a + block.size
+                working_index = block.b + block.size
 
         return self._lines
+
+    def _lines_from_pairs(self, head_lines, working_lines):
+        return [
+            Line.from_blame(self, working, head)
+            for (head, working) in zip(head_lines, working_lines)
+        ]
+
+    def _lines_from_unmatched_sections(self, head_lines, working_lines):
+        commits = set([
+            BLAME_PATTERN.match(head_line).group("commit")
+            for head_line in head_lines
+        ])
+
+        if len(commits) == 1:
+            commit = commits.pop()
+            return [
+                Line.from_blame(self, working, head, commit)
+                for (head, working) in izip_longest(head_lines, working_lines)
+            ]
+        else:
+            raise self.AmbiguousSection()
 
     def working_blame(self):
         if not hasattr(self, "_working_blame"):
@@ -180,9 +239,9 @@ class CLI(object):
 
             try:
                 f.apply_patches()
-            except File.NumberOfLinesChanged:
+            except File.AmbiguousSection:
                 print(
-                    "Skipping {0}: number of lines changed".format(f.path),
+                    "Skipping {0}: ambiguous section".format(f.path),
                     file=sys.stderr,
                 )
 
