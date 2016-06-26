@@ -1,0 +1,197 @@
+#!/usr/bin/env python
+
+"""
+A custom Git command to quickly create fixup commits in preparation for an
+interactive rebase.
+
+git-fixup will examine each changed line of each modified file, determine the
+last commit which touched the line, and create a fixup commit targetting that
+commit.
+
+Usage:
+
+    git fixup [path]
+
+        If path is given, only that file is processed.
+        If path is omitted, all modified files are processed.
+
+Limitations:
+
+* git-fixup will only attempt to patch files with the same number of lines
+  before and after the current changes.
+
+* git-fixup will only attempt to patch files that have been modified, but
+  haven't been staged yet.
+
+* If the number of lines in a file hasn't changed, but the changes are separate
+  (e.g. a line was removed from the beginning of the file, while another was
+  removed from the end of the file) the commits made by git-fixup will be
+  surprising, and may cause merge conflicts during the rebase.
+"""
+
+from __future__ import print_function
+from collections import defaultdict
+import difflib
+import re
+import subprocess
+import sys
+
+BLAME_PATTERN = re.compile(
+    r"^\^?(?P<commit>[^ ]+) \(.* (?P<line_number>\d+)\) (?P<contents>.*)$",
+)
+STATUS_PATTERN = re.compile(r"^(?P<status>..)\s+(?P<path>[^ ]+)")
+
+
+class Status(object):
+    MODIFIED_NOT_STAGED = " M"
+
+    def modified_paths(self):
+        return [
+            status["path"]
+            for status in self.statuses()
+            if status["status"] == self.MODIFIED_NOT_STAGED
+        ]
+
+    def statuses(self):
+        cmd = ["git", "status", "--porcelain"]
+        return [
+            STATUS_PATTERN.match(line).groupdict()
+            for line in subprocess.check_output(cmd).splitlines()
+        ]
+
+
+class Line(object):
+    @classmethod
+    def from_blame(cls, file, working_line, head_line):
+        working = BLAME_PATTERN.match(working_line).groupdict()
+        head = BLAME_PATTERN.match(head_line).groupdict()
+
+        return cls(
+            file=file,
+            number=head["line_number"],
+            changed=(working_line != head_line),
+            old_contents=head["contents"],
+            new_contents=working["contents"],
+            last_commit=head["commit"],
+        )
+
+    def __init__(
+        self, file, number, changed, old_contents, new_contents, last_commit,
+    ):
+        self.applied = False
+        self.file = file
+        self.number = number
+        self.changed = changed
+        self.old_contents = old_contents
+        self.new_contents = new_contents
+        self.last_commit = last_commit
+
+    def contents_for_context(self):
+        if self.applied:
+            return self.new_contents
+        else:
+            return self.old_contents
+
+
+class File(object):
+    class NumberOfLinesChanged(Exception):
+        pass
+
+    def __init__(self, path):
+        self.path = path
+
+    def apply_patches(self):
+        for commit, patch in self.patches():
+            process = subprocess.Popen(
+                ["git", "apply", "-v", "--cached", "-"],
+                stdin=subprocess.PIPE,
+            )
+            process.communicate(patch)
+            subprocess.check_output(["git", "commit", "--fixup", commit])
+
+    def patches(self):
+        patches = defaultdict(list)
+        for line in self.lines():
+            if line.changed:
+                patches[line.last_commit].append(line)
+
+        return [
+            self._build_patch(commit, lines)
+            for (commit, lines) in patches.items()
+        ]
+
+    def _build_patch(self, commit, changed_lines):
+        before = []
+        after = []
+
+        for line in self.lines():
+            if line in changed_lines:
+                before.append(line.old_contents + "\n")
+                after.append(line.new_contents + "\n")
+                line.applied = True
+            else:
+                before.append(line.contents_for_context() + "\n")
+                after.append(line.contents_for_context() + "\n")
+
+        patch = difflib.unified_diff(
+            before,
+            after,
+            fromfile="a/{0}".format(self.path),
+            tofile="b/{0}".format(self.path),
+        )
+
+        return commit, "".join(patch)
+
+    def lines(self):
+        if not hasattr(self, "_lines"):
+            if len(self.working_blame()) != len(self.head_blame()):
+                raise self.NumberOfLinesChanged()
+
+            self._lines = [
+                Line.from_blame(self, working, head)
+                for (working, head)
+                in zip(self.working_blame(), self.head_blame())
+            ]
+
+        return self._lines
+
+    def working_blame(self):
+        if not hasattr(self, "_working_blame"):
+            cmd = ["git", "blame", "--", self.path]
+            self._working_blame = subprocess.check_output(cmd).splitlines()
+
+        return self._working_blame
+
+    def head_blame(self):
+        if not hasattr(self, "_head_blame"):
+            cmd = ["git", "blame", "HEAD", "--", self.path]
+            self._head_blame = subprocess.check_output(cmd).splitlines()
+
+        return self._head_blame
+
+
+class CLI(object):
+    def __init__(self, args):
+        self.args = args
+
+    def run(self):
+        for path in self.paths():
+            f = File(path)
+
+            try:
+                f.apply_patches()
+            except File.NumberOfLinesChanged:
+                print(
+                    "Skipping {0}: number of lines changed".format(f.path),
+                    file=sys.stderr,
+                )
+
+    def paths(self):
+        if len(self.args) == 1:
+            return Status().modified_paths()
+        elif len(self.args) == 2:
+            return [self.args[1]]
+
+
+if __name__ == "__main__":
+    CLI(sys.argv).run()
