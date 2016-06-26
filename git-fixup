@@ -45,7 +45,7 @@ import sys
 BLAME_PATTERN = re.compile(
     r"^\^?(?P<commit>[^ ]+) \(.* (?P<line_number>\d+)\) (?P<contents>.*)$",
 )
-STATUS_PATTERN = re.compile(r"^(?P<status>..)\s+(?P<path>[^ ]+)")
+STATUS_PATTERN = re.compile(r"^(?P<status>..)\s+(?P<path>.*)( -> .*)?$")
 
 
 class Status(object):
