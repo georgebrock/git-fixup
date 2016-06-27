@@ -63,8 +63,10 @@ class Status(object):
         return [
             status["path"]
             for status in self.statuses()
-            if status["status"] != self.UNTRACKED and
-            status["status"][0] != " "
+            if (
+                status["status"] != self.UNTRACKED and
+                status["status"][0] != " "
+            )
         ]
 
     def statuses(self):
