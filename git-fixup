@@ -185,7 +185,7 @@ class File(object):
                 unmatching_working = working[working_index:block.b]
 
                 matching_head = head[block.a:block.a + block.size]
-                matching_working = head[block.b:block.b + block.size]
+                matching_working = working[block.b:block.b + block.size]
 
                 if len(unmatching_head) == len(unmatching_working):
                     self._lines.extend(self._lines_from_pairs(
