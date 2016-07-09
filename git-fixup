@@ -79,19 +79,15 @@ class Status(object):
 
 class Line(object):
     @classmethod
-    def from_blame(cls, working_line, head_line, commit=None):
-        if working_line is not None:
-            working = BLAME_PATTERN.match(working_line).groupdict()
-        else:
+    def from_blame(cls, working, head, commit=None):
+        if working is None:
             working = {}
 
-        if head_line is not None:
-            head = BLAME_PATTERN.match(head_line).groupdict()
-        else:
+        if head is None:
             head = {}
 
         return cls(
-            changed=(working_line != head_line),
+            changed=(working.get("contents") != head.get("contents")),
             old_contents=head.get("contents"),
             new_contents=working.get("contents"),
             last_commit=head.get("commit", commit),
@@ -170,12 +166,21 @@ class File(object):
             self._lines = []
             head = self.head_blame()
             working = self.working_blame()
-            sm = difflib.SequenceMatcher(a=head, b=working)
+            diffable_head = [
+                "{commit} {contents}".format(**blame) for blame in head
+            ]
+            diffable_working = [
+                "{commit} {contents}".format(**blame) for blame in working
+            ]
+            sequence_matcher = difflib.SequenceMatcher(
+                a=diffable_head,
+                b=diffable_working,
+            )
 
             head_index = 0
             working_index = 0
 
-            for block in sm.get_matching_blocks():
+            for block in sequence_matcher.get_matching_blocks():
                 unmatching_head = head[head_index:block.a]
                 unmatching_working = working[working_index:block.b]
 
@@ -210,10 +215,7 @@ class File(object):
         ]
 
     def _lines_from_unmatched_sections(self, head_lines, working_lines):
-        commits = set([
-            BLAME_PATTERN.match(head_line).group("commit")
-            for head_line in head_lines
-        ])
+        commits = set([head_line["commit"] for head_line in head_lines])
 
         if len(commits) == 1:
             commit = commits.pop()
@@ -227,14 +229,22 @@ class File(object):
     def working_blame(self):
         if not hasattr(self, "_working_blame"):
             cmd = ["git", "blame", "--", self.path]
-            self._working_blame = subprocess.check_output(cmd).splitlines()
+            self._working_blame = [
+                BLAME_PATTERN.match(line).groupdict()
+                for line
+                in subprocess.check_output(cmd).splitlines()
+            ]
 
         return self._working_blame
 
     def head_blame(self):
         if not hasattr(self, "_head_blame"):
             cmd = ["git", "blame", "HEAD", "--", self.path]
-            self._head_blame = subprocess.check_output(cmd).splitlines()
+            self._head_blame = [
+                BLAME_PATTERN.match(line).groupdict()
+                for line
+                in subprocess.check_output(cmd).splitlines()
+            ]
 
         return self._head_blame
 
