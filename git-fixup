@@ -42,9 +42,8 @@ import re
 import subprocess
 import sys
 
-BLAME_PATTERN = re.compile(
-    r"^\^?(?P<commit>[^ ]+) .*\(.* (?P<line_number>\d+)\) (?P<contents>.*)$",
-)
+BLAME_COMMIT_PATTERN = re.compile(r"^(?P<commit>[0-9a-f]{40}) \d+ \d+( \d+)?$")
+BLAME_CONTENT_PATTERN = re.compile(r"^\t(?P<contents>.*)$")
 STATUS_PATTERN = re.compile(r"^(?P<status>..)\s+(?P<path>.*)( -> .*)?$")
 
 
@@ -228,25 +227,37 @@ class File(object):
 
     def working_blame(self):
         if not hasattr(self, "_working_blame"):
-            cmd = ["git", "blame", "--", self.path]
-            self._working_blame = [
-                BLAME_PATTERN.match(line).groupdict()
-                for line
-                in subprocess.check_output(cmd).splitlines()
-            ]
+            cmd = ["git", "blame", "--porcelain", "--", self.path]
+            lines = subprocess.check_output(cmd).splitlines()
+            self._working_blame = self._parse_blame_porcelain(lines)
 
         return self._working_blame
 
     def head_blame(self):
         if not hasattr(self, "_head_blame"):
-            cmd = ["git", "blame", "HEAD", "--", self.path]
-            self._head_blame = [
-                BLAME_PATTERN.match(line).groupdict()
-                for line
-                in subprocess.check_output(cmd).splitlines()
-            ]
+            cmd = ["git", "blame", "--porcelain", "HEAD", "--", self.path]
+            lines = subprocess.check_output(cmd).splitlines()
+            self._head_blame = self._parse_blame_porcelain(lines)
 
         return self._head_blame
+
+    @staticmethod
+    def _parse_blame_porcelain(lines):
+        current = {}
+        blame_entries = []
+
+        for line in lines:
+            commit_match = BLAME_COMMIT_PATTERN.match(line)
+            content_match = BLAME_CONTENT_PATTERN.match(line)
+
+            if commit_match:
+                current = commit_match.groupdict()
+            elif content_match:
+                current.update(content_match.groupdict())
+                blame_entries.append(current)
+                current = {}
+
+        return blame_entries
 
 
 class CLI(object):
